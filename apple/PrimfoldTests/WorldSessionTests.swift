@@ -133,12 +133,12 @@ private final class SimulatorFixture {
     init() throws {
         listener = try NWListener(using: .udp, on: .any)
         listener.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 if case .ready = state { self?.port = self?.listener.port?.rawValue }
             }
         }
         listener.newConnectionHandler = { [weak self] connection in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.peer = connection
                 connection.start(queue: .main)
@@ -155,7 +155,7 @@ private final class SimulatorFixture {
 
     private func receive(_ connection: NWConnection) {
         connection.receiveMessage { [weak self] data, _, _, error in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, error == nil else { return }
                 if let data { self.handle(data) }
                 self.receive(connection)

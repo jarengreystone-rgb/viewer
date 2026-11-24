@@ -120,7 +120,7 @@ final class WorldSession {
         let connection = NWConnection(host: NWEndpoint.Host(session.host), port: port, using: .udp)
         self.connection = connection
         connection.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, self.generation == attempt else { return }
                 switch state {
                 case .ready:
@@ -169,7 +169,7 @@ final class WorldSession {
 
     private func receive(_ connection: NWConnection, attempt: UUID) {
         connection.receiveMessage { [weak self] data, _, _, error in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, self.generation == attempt, self.connection === connection else { return }
                 if error != nil {
                     self.fail(String(localized: "The simulator connection was interrupted."))
@@ -422,7 +422,7 @@ final class WorldSession {
         let attempt = generation
         connection?.send(content: data, completion: .contentProcessed { [weak self] error in
             guard error != nil else { return }
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, self.generation == attempt else { return }
                 self.fail(String(localized: "Unable to send data to the simulator."))
             }
