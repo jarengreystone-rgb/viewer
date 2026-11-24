@@ -31,27 +31,36 @@ enum Workspace: String, CaseIterable, Identifiable {
 }
 
 struct PrimfoldView: View {
-    // Keep navigation state above both columns so resizing preserves selection.
+    // Keep navigation and the simulator session above both columns.
     @State private var selection: Workspace? = .world
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var compactColumn: NavigationSplitViewColumn = .detail
+    @State private var session = WorldSession()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationSplitView(
             columnVisibility: $columnVisibility,
             preferredCompactColumn: $compactColumn
         ) {
-            WorkspaceSidebar(selection: $selection)
+            WorkspaceSidebar(selection: $selection, session: session)
         } detail: {
-            WorkspaceDetail(workspace: selection ?? .world)
+            WorkspaceDetail(workspace: selection ?? .world, session: session)
         }
         .navigationSplitViewStyle(.balanced)
         .tint(.teal)
+        .onChange(of: scenePhase) { _, phase in
+            // iOS suspends UDP work in the background; explicitly leave the region.
+            if phase == .background {
+                Task { await session.signOut() }
+            }
+        }
     }
 }
 
 private struct WorkspaceSidebar: View {
     @Binding var selection: Workspace?
+    let session: WorldSession
 
     var body: some View {
         List(selection: $selection) {
@@ -67,8 +76,12 @@ private struct WorkspaceSidebar: View {
                 }
             }
             Section {
-                Label("Offline", systemImage: "wifi.slash")
-                    .foregroundStyle(.secondary)
+                Label {
+                    Text(session.phase.title)
+                } icon: {
+                    Image(systemName: session.phase == .online ? "wifi" : "wifi.slash")
+                }
+                .foregroundStyle(.secondary)
                 Text("An independent viewer for Second Life.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -81,16 +94,19 @@ private struct WorkspaceSidebar: View {
 
 private struct WorkspaceDetail: View {
     let workspace: Workspace
+    let session: WorldSession
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-                WorkspaceHeader(workspace: workspace)
-                OfflineNotice()
+        Group {
+            if workspace == .world {
+                if session.phase == .online || session.phase == .disconnecting {
+                    ConnectedWorldView(session: session)
+                } else {
+                    WorldLoginView(session: session)
+                }
+            } else {
+                CreatorPlaceholderView()
             }
-            .frame(maxWidth: 640, alignment: .leading)
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .center)
         }
         .navigationTitle(Text(workspace.title))
         .navigationBarTitleDisplayMode(.inline)
@@ -98,42 +114,26 @@ private struct WorkspaceDetail: View {
     }
 }
 
-private struct WorkspaceHeader: View {
-    let workspace: Workspace
-
+private struct CreatorPlaceholderView: View {
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Image(systemName: workspace.symbol)
-                .font(.largeTitle)
-                .foregroundStyle(.teal)
-                .accessibilityHidden(true)
-            Text(workspace == .world ? "Welcome to Primfold" : "Room to create")
-                .font(.largeTitle.bold())
-                .fixedSize(horizontal: false, vertical: true)
-            Text(workspace == .world
-                 ? "Your Second Life workspace, ready to grow."
-                 : "Creator tools are a long-term goal for Primfold.")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Image(systemName: "cube.transparent")
+                    .font(.largeTitle)
+                    .foregroundStyle(.teal)
+                    .accessibilityHidden(true)
+                Text("Room to create")
+                    .font(.largeTitle.bold())
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Creator tools are a long-term goal for Primfold.")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                Text("Building and editing world objects are not available yet.")
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: 640, alignment: .leading)
+            .padding(24)
+            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct OfflineNotice: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("Offline preview", systemImage: "wifi.slash")
-                .font(.headline)
-            Text("Grid login and world rendering are not available in this first version.")
-                .foregroundStyle(.secondary)
-            Text("Explore World and Creator Tools from the workspace menu.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(20)
-        .background(.background, in: RoundedRectangle(cornerRadius: 20))
     }
 }

@@ -1,6 +1,26 @@
 # Primfold for iOS
 
-Minimal native SwiftUI shell for iPad and iPhone Duo, targeting iOS 17 or later. Grid login, networking, world rendering, and creator tools are deferred. The desktop viewer and its build remain separate.
+Native SwiftUI client for iPad and iPhone, currently targeting iOS 27 or later. The app now includes an initial Second Life login and simulator connection, nearby chat, short walking steps, and a RealityKit view of streamed object bounds. The desktop viewer and its build remain separate.
+
+## Connected version
+
+1. Build and run the shared `Primfold` scheme. Open **World**.
+2. Enter your account username (one name, `first.last`, or `First Last`) and password. Do not use a display name or email address. One-name accounts use the `Resident` last name automatically.
+3. Choose Second Life or Second Life Beta, and Last location or Home. Supply an authentication code if your account requires it.
+4. Read the linked Terms of Service, check the agreement, and select **Sign In**. The app reports server login errors and waits for the simulator to confirm entry before showing Connected.
+5. Use the short-step and turn buttons, open **Nearby Chat**, or select **Sign Out**. Entering the background signs out because iOS suspends the simulator connection.
+
+This is an early connected client, not a complete mobile port. The 3D view draws untextured bounding boxes at the positions, scales, rotations, and parent transforms sent by the simulator. Avatar bounds are teal. It shows up to 2,000 object bounds within the current region; it does not draw terrain, mesh assets, textures, avatar appearance, or animations. Inventory, object editing, teleporting, region crossings, and voice are not implemented. Sign out before moving between regions. Signing in can disconnect another viewer using the same account.
+
+Login uses HTTPS XML-RPC. Passwords and MFA codes are never saved, and login responses are not logged. Only a random installation identifier is persisted. Simulator traffic uses LLUDP, with reliable packet acknowledgements, duplicate suppression, retries, ping responses, and connection timeouts. Layouts and message numbers follow `../scripts/messages/message_template.msg`; login and object decoding also follow the desktop viewer code.
+
+## Automated checks
+
+Run **Product → Test** (⌘U) with the Primfold scheme. `PrimfoldTests` uses Swift Testing. Relative source symlinks compile the production login, packet, and session files into the standalone test bundle so protocol checks do not require launching the app or signing into an account.
+
+Checks cover XML-RPC parsing, account-name handling, malformed and zerocoded packets, byte order, object updates, signed circuit codes, cancellation, and a loopback UDP simulator fixture. The fixture exercises a dropped circuit packet, region confirmation, duplicate chat, sending chat, movement controls, and logout. These checks do not authenticate against Second Life. A successful account login, actual appearance in the region, and interoperability with a live simulator still require device verification.
+
+Verified November 24, 2026: Xcode build succeeded and all 33 checks passed. The login UI was inspected on iPhone Duo and iPad (A16) simulators. On iPad, dummy field entry, agreement gating, and World/Creator navigation passed. No credentials were submitted to a live grid. A RealityKit snippet also verified linked bounds, camera coordinate conversion, and removal of stale entities.
 
 ## Run
 
