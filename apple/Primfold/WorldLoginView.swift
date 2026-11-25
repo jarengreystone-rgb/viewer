@@ -2,14 +2,12 @@ import SwiftUI
 
 struct WorldLoginView: View {
     let session: WorldSession
-    @State private var username = ""
-    @State private var password = ""
-    @State private var token = ""
-    @State private var grid = Grid.secondLife
+    @State private var account = LoginAccountForm()
     @State private var start = "last"
     @State private var agreeToTerms = false
 
     var body: some View {
+        @Bindable var account = account
         Form {
             Section {
                 Text("Sign in to Second Life")
@@ -18,16 +16,16 @@ struct WorldLoginView: View {
                     .foregroundStyle(.secondary)
             }
             Section("Account") {
-                TextField("Username (first.last or first)", text: $username)
+                TextField("Username (first.last or first)", text: $account.username)
                     .textContentType(.username)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                SecureField("Password", text: $password)
+                SecureField("Password", text: $account.password)
                     .textContentType(.password)
-                TextField("Authentication code (if required)", text: $token)
+                TextField("Authentication code (if required)", text: $account.token)
                     .textContentType(.oneTimeCode)
                     .keyboardType(.numberPad)
-                Picker("Grid", selection: $grid) {
+                Picker("Grid", selection: $account.grid) {
                     ForEach(Grid.allCases) { grid in
                         Text(grid.title).tag(grid)
                     }
@@ -37,7 +35,26 @@ struct WorldLoginView: View {
                     Text("Home").tag("home")
                 }
             }
-            .disabled(session.phase != .offline)
+            .disabled(session.phase != .offline || account.isLoading || account.isSaving)
+
+            Section {
+                Toggle("Remember account on this device", isOn: $account.rememberAccount)
+                    .accessibilityIdentifier("rememberAccountToggle")
+                if account.hasSavedAccount {
+                    Button("Forget Saved Account", role: .destructive) {
+                        Task { await account.forgetAccount(for: account.grid, clearForm: true) }
+                    }
+                    .accessibilityIdentifier("forgetAccountButton")
+                }
+                if let error = account.storageError {
+                    Text(error)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("credentialStorageError")
+                }
+            } footer: {
+                Text("When enabled, your username and password are saved in this device’s Keychain. Turn this off or choose Forget Saved Account to remove them. Authentication codes are never saved.")
+            }
+            .disabled(session.phase != .offline || account.isLoading || account.isSaving)
 
             Section {
                 if let termsURL = URL(string: "https://www.lindenlab.com/legal/second-life-terms-and-conditions") {
@@ -69,35 +86,38 @@ struct WorldLoginView: View {
                 } else {
                     Button("Sign In") { signIn() }
                         .buttonStyle(.borderedProminent)
-                        .disabled(username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                  || password.isEmpty || !agreeToTerms)
+                        .disabled(account.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                  || account.password.isEmpty || !agreeToTerms
+                                  || account.isLoading || account.isSaving)
                         .accessibilityIdentifier("signInButton")
                 }
             } footer: {
-                Text("Passwords and authentication codes are used for this sign-in only and are never saved.")
+                Text("Accounts are saved only when Remember account is enabled. You will still choose when to sign in.")
             }
 
             Section("Early connected version") {
-                Text("This version supports a single region, nearby chat, short walking steps, and a 3D view of live object bounds.")
+                Text("This version supports a single region, nearby chat, short walking steps, and an initial geometry preview.")
                 Text("Terrain, textures, mesh shapes, avatar appearance, inventory, teleporting, and region crossings are not supported yet.")
                     .foregroundStyle(.secondary)
                 Text("Signing in here may disconnect another viewer using the same account.")
                     .foregroundStyle(.secondary)
             }
         }
+        .task(id: account.grid) {
+            await account.loadSavedAccount(for: account.grid)
+        }
         .onDisappear {
-            password = ""
-            token = ""
+            account.clearSensitiveFields()
         }
     }
 
     private func signIn() {
-        let credentials = LoginCredentials(username: username, password: password,
-                                           token: token, start: start, grid: grid,
-                                           agreeToTerms: agreeToTerms)
-        session.signIn(credentials)
-        password = ""
-        token = ""
+        Task {
+            guard let credentials = await account.prepareCredentials(start: start, agreeToTerms: agreeToTerms) else { return }
+            session.signIn(credentials)
+            account.token = ""
+            if !account.rememberAccount { account.password = "" }
+        }
     }
 }
 
@@ -111,14 +131,14 @@ struct ConnectedWorldView: View {
             WorldSceneView(session: session)
                 .frame(minHeight: 240)
                 .overlay(alignment: .topLeading) {
-                    Text("Simplified live view")
+                    Text("Geometry preview")
                         .font(.caption)
                         .padding(8)
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
                         .padding(12)
                 }
             WorldMovementControls(session: session)
-            Text("Live bounds only. Terrain, textures, mesh shapes, and avatar appearance are not rendered.")
+            Text("Basic boxes and cylinders use simulator shape data. Other objects and avatars still show bounds. Textures, meshes, and terrain are not rendered.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal)

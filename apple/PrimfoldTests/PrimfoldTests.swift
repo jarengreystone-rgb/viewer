@@ -130,6 +130,8 @@ struct SimulatorProtocolTests {
         #expect(object.scale == SIMD3(2, 3, 4))
         #expect(object.rotation == SIMD4(0, 0, 0, 1))
         #expect(object.parentID == 7)
+        #expect(object.appearance?.basicPrimitive == .cylinder)
+        #expect(object.appearance?.shape[6] == 100)
         #expect(!object.isAvatar)
         for count in 0..<data.count {
             #expect(throws: (any Error).self) {
@@ -204,6 +206,14 @@ struct SimulatorProtocolTests {
         writer.bytes += Array(repeating: 0, count: 16) // owner
         writer.vector(.zero)
         writer.u32(7)
+        writer.u8(0) // Extra parameter count.
+        var shape = Array(repeating: UInt8(0), count: 23)
+        shape[0] = 0x10
+        shape[6] = 100
+        shape[7] = 100
+        writer.bytes += [shape[0]] + Array(shape[2..<17]) // Path.
+        writer.bytes += [shape[1]] + Array(shape[17..<23]) // Profile.
+        writer.u32(0) // Texture entry length.
         return writer.bytes
     }
 }

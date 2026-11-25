@@ -1,3 +1,5 @@
+import Observation
+import Security
 import CryptoKit
 import Foundation
 
@@ -217,7 +219,7 @@ extension GridSession {
 }
 
 actor GridLogin: GridAuthenticating {
-    // Never persist passwords, password hashes, MFA codes, or session credentials.
+    // This transport does not persist credentials; optional account storage uses Keychain.
     func login(_ credentials: LoginCredentials, deviceID: String) async throws -> GridSession {
         guard let name = credentials.avatarName, !credentials.password.isEmpty else {
             throw WorldError.message(String(localized: "Enter your account username and password."))
@@ -289,5 +291,191 @@ private final class LoginRedirectPolicy: NSObject, URLSessionTaskDelegate {
                     completionHandler: @escaping (URLRequest?) -> Void) {
         // XML-RPC redirects are handled explicitly above; never forward a credential POST.
         completionHandler(nil)
+    }
+}
+
+
+// MARK: - Saved accounts
+
+struct SavedLoginAccount: Codable, Equatable, Sendable {
+    let username: String
+    let password: String
+}
+
+protocol LoginCredentialStoring: Sendable {
+    func load(for grid: Grid) async throws -> SavedLoginAccount?
+    func save(_ account: SavedLoginAccount, for grid: Grid) async throws
+    func remove(for grid: Grid) async throws
+}
+
+/// Keychain operations run off the main actor. Each grid has its own account slot.
+actor KeychainLoginCredentialStore: LoginCredentialStoring {
+    private let service: String
+
+    init(service: String = "org.primfold.viewer.saved-login") {
+        self.service = service
+    }
+
+    func load(for grid: Grid) throws -> SavedLoginAccount? {
+        var query = identity(for: grid)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw CredentialStorageError(status: status) }
+        guard let data = item as? Data else { throw CredentialStorageError(status: errSecDecode) }
+        return try JSONDecoder().decode(SavedLoginAccount.self, from: data)
+    }
+
+    func save(_ account: SavedLoginAccount, for grid: Grid) throws {
+        let identity = identity(for: grid)
+        let attributes: [String: Any] = [
+            kSecValueData as String: try JSONEncoder().encode(account),
+            // Accessible while unlocked, confined to this device, without iCloud sync.
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
+        let status = SecItemUpdate(identity as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            let insertion = identity.merging(attributes) { _, new in new }
+            let insertionStatus = SecItemAdd(insertion as CFDictionary, nil)
+            guard insertionStatus == errSecSuccess else { throw CredentialStorageError(status: insertionStatus) }
+        } else if status != errSecSuccess {
+            throw CredentialStorageError(status: status)
+        }
+    }
+
+    func remove(for grid: Grid) throws {
+        let status = SecItemDelete(identity(for: grid) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw CredentialStorageError(status: status)
+        }
+    }
+
+    private func identity(for grid: Grid) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: grid.rawValue,
+            kSecAttrSynchronizable as String: false
+        ]
+    }
+}
+
+struct CredentialStorageError: LocalizedError {
+    let status: OSStatus
+
+    var errorDescription: String? {
+        String(localized: "Unable to access the saved account in Keychain. Unlock your device and try again.")
+    }
+}
+
+@MainActor
+@Observable
+final class LoginAccountForm {
+    var username = ""
+    var password = ""
+    var token = ""
+    var grid = Grid.secondLife
+    private(set) var isLoading = false
+    private(set) var isSaving = false
+    private(set) var hasSavedAccount = false
+    private(set) var storageError: String?
+    private var rememberPreference = false
+
+    @ObservationIgnored private var credentialRevision = UUID()
+    @ObservationIgnored private let store: any LoginCredentialStoring
+
+    init(store: any LoginCredentialStoring = KeychainLoginCredentialStore()) {
+        self.store = store
+    }
+
+    var rememberAccount: Bool {
+        get { rememberPreference }
+        set {
+            rememberPreference = newValue
+            let revision = UUID()
+            credentialRevision = revision
+            if !newValue {
+                let selectedGrid = grid
+                Task { await removeAccount(for: selectedGrid, revision: revision, clearForm: false) }
+            }
+        }
+    }
+
+    func loadSavedAccount(for selectedGrid: Grid) async {
+        guard grid == selectedGrid else { return }
+        isLoading = true
+        username = ""
+        password = ""
+        token = ""
+        rememberPreference = false
+        hasSavedAccount = false
+        storageError = nil
+        do {
+            let saved = try await store.load(for: selectedGrid)
+            guard !Task.isCancelled, grid == selectedGrid else { return }
+            if let saved {
+                username = saved.username
+                password = saved.password
+                rememberPreference = true
+                hasSavedAccount = true
+            }
+        } catch {
+            guard !Task.isCancelled, grid == selectedGrid else { return }
+            storageError = error.localizedDescription
+        }
+        if grid == selectedGrid { isLoading = false }
+    }
+
+    func prepareCredentials(start: String, agreeToTerms: Bool) async -> LoginCredentials? {
+        guard !isLoading, !isSaving else { return nil }
+        let credentials = LoginCredentials(username: username, password: password, token: token,
+                                           start: start, grid: grid, agreeToTerms: agreeToTerms)
+        guard credentials.avatarName != nil, !password.isEmpty else { return nil }
+        isSaving = true
+        storageError = nil
+        defer { isSaving = false }
+        do {
+            if rememberPreference {
+                try await store.save(SavedLoginAccount(username: username, password: password), for: grid)
+                hasSavedAccount = true
+            }
+            // MFA codes and session tokens are never included in the saved account.
+            return credentials
+        } catch {
+            storageError = error.localizedDescription
+            return nil
+        }
+    }
+
+    func forgetAccount(for selectedGrid: Grid, clearForm: Bool = false) async {
+        let revision = UUID()
+        credentialRevision = revision
+        if grid == selectedGrid { rememberPreference = false }
+        await removeAccount(for: selectedGrid, revision: revision, clearForm: clearForm)
+    }
+
+    private func removeAccount(for selectedGrid: Grid, revision: UUID, clearForm: Bool) async {
+        do {
+            try await store.remove(for: selectedGrid)
+            guard grid == selectedGrid else { return }
+            hasSavedAccount = false
+            guard credentialRevision == revision else { return }
+            storageError = nil
+            if clearForm {
+                username = ""
+                clearSensitiveFields()
+            }
+        } catch {
+            guard grid == selectedGrid, credentialRevision == revision else { return }
+            rememberPreference = true
+            storageError = error.localizedDescription
+        }
+    }
+
+    func clearSensitiveFields() {
+        password = ""
+        token = ""
     }
 }

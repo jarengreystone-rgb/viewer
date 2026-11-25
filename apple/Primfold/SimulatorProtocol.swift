@@ -157,6 +157,7 @@ struct WorldObject: Equatable {
     let scale: SIMD3<Float>
     let parentID: UInt32
     let isAvatar: Bool
+    var appearance: ObjectAppearance? = nil
 }
 
 enum ObjectDecoder {
@@ -168,14 +169,18 @@ enum ObjectDecoder {
         let scale = try reader.vector()
         let data = try reader.variable(1)
         let parent = try reader.u32()
-        try reader.skip(4 + 23) // UpdateFlags and the packed path/profile parameters.
-        _ = try reader.variable(2) // TextureEntry
+        try reader.skip(4) // UpdateFlags
+        let shape = try reader.take(23)
+        let textures = try reader.variable(2)
         _ = try reader.variable(1) // TextureAnim
         _ = try reader.variable(2) // NameValue
         _ = try reader.variable(2) // Data
         _ = try reader.variable(1) // Text
         try reader.skip(4)
-        for _ in 0..<3 { _ = try reader.variable(1) } // MediaURL, particles, extra parameters
+        _ = try reader.variable(1) // MediaURL
+        _ = try reader.variable(1) // Particle system
+        let extras = try ObjectAppearance.extraParameters(reader.variable(1))
+        let appearance = ObjectAppearance(shape: shape, textureEntry: textures, extraParameters: extras)
         try reader.skip(16 + 16 + 4 + 1 + 4 + 1 + 12 + 12)
 
         var packed = PacketReader(data)
@@ -202,7 +207,7 @@ enum ObjectDecoder {
         default: return nil
         }
         return validated(id: id, position: position, rotation: rotation,
-                         scale: scale, parent: parent, pcode: pcode)
+                         scale: scale, parent: parent, pcode: pcode, appearance: appearance)
     }
 
     static func compressed(_ data: [UInt8]) throws -> WorldObject? {
@@ -218,8 +223,25 @@ enum ObjectDecoder {
         try reader.skip(16)
         if flags & 0x80 != 0 { try reader.skip(12) }
         let parent: UInt32 = flags & 0x20 != 0 ? try reader.u32() : 0
+        if flags & 0x02 != 0 {
+            try reader.skip(1)
+        } else if flags & 0x01 != 0 {
+            try reader.skip(Int(reader.u32()))
+        }
+        if flags & 0x04 != 0 { _ = try reader.terminatedString(); try reader.skip(4) }
+        if flags & 0x200 != 0 { _ = try reader.terminatedString() }
+        if flags & 0x08 != 0 { try reader.skip(86) } // Legacy particle system.
+        let extras = try ObjectAppearance.readExtraParameters(&reader)
+        if flags & 0x10 != 0 { try reader.skip(25) }
+        if flags & 0x100 != 0 { _ = try reader.terminatedString() }
+        // Compressed updates put ProfileCurve after all 16 path bytes.
+        let path = try reader.take(16)
+        let profile = try reader.take(7)
+        let shape = [path[0], profile[0]] + Array(path.dropFirst()) + Array(profile.dropFirst())
+        let textures = try reader.take(Int(reader.u32()))
+        let appearance = ObjectAppearance(shape: shape, textureEntry: textures, extraParameters: extras)
         return validated(id: id, position: position, rotation: rotation,
-                         scale: scale, parent: parent, pcode: pcode)
+                         scale: scale, parent: parent, pcode: pcode, appearance: appearance)
     }
 
     static func terse(_ data: [UInt8]) throws -> (UInt32, SIMD3<Float>, SIMD4<Float>) {
@@ -247,12 +269,155 @@ enum ObjectDecoder {
     }
 
     private static func validated(id: UInt32, position: SIMD3<Float>, rotation: SIMD4<Float>,
-                                  scale: SIMD3<Float>, parent: UInt32, pcode: UInt8) -> WorldObject? {
+                                  scale: SIMD3<Float>, parent: UInt32, pcode: UInt8,
+                                  appearance: ObjectAppearance? = nil) -> WorldObject? {
         guard [position.x, position.y, position.z, rotation.x, rotation.y, rotation.z, rotation.w,
                scale.x, scale.y, scale.z].allSatisfy(\.isFinite),
               simd_length(position) < 100_000, scale.min() > 0, scale.max() < 4096,
               simd_length_squared(rotation) > 0.1 else { return nil }
         return WorldObject(id: id, position: position, rotation: rotation,
-                           scale: scale, parentID: parent, isAvatar: pcode == 47)
+                           scale: scale, parentID: parent, isAvatar: pcode == 47, appearance: appearance)
+    }
+}
+
+
+// MARK: - Object appearance
+
+/// The simulator's original shape and appearance data is retained for asset rendering.
+struct ObjectAppearance: Equatable {
+    enum BasicPrimitive {
+        case box, cylinder
+    }
+
+    let shape: [UInt8]
+    let textureEntry: [UInt8]
+    let extraParameters: [UInt16: [UInt8]]
+
+    var faces: [FaceAppearance] {
+        (try? TextureEntryDecoder.decode(textureEntry)) ?? []
+    }
+
+    /// Only recognize undeformed, uncut linear primitives. Meshes/sculpts need their assets.
+    var basicPrimitive: BasicPrimitive? {
+        guard shape.count == 23, extraParameters[0x30] == nil,
+              shape[0] == 0x10, shape[6] == 100, shape[7] == 100,
+              shape[2..<6].allSatisfy({ $0 == 0 }),
+              shape[8..<23].allSatisfy({ $0 == 0 }) else { return nil }
+        switch shape[1] {
+        case 0x01: return .box
+        case 0x00: return .cylinder
+        default: return nil
+        }
+    }
+
+    static func extraParameters(_ data: [UInt8]) throws -> [UInt16: [UInt8]] {
+        guard !data.isEmpty else { return [:] }
+        var reader = PacketReader(data)
+        return try readExtraParameters(&reader)
+    }
+
+    static func readExtraParameters(_ reader: inout PacketReader) throws -> [UInt16: [UInt8]] {
+        let count = try reader.u8()
+        var result: [UInt16: [UInt8]] = [:]
+        for _ in 0..<count {
+            let type = try reader.u16()
+            let size = try reader.u32()
+            result[type] = try reader.take(Int(size))
+        }
+        return result
+    }
+}
+
+struct FaceAppearance: Equatable {
+    var textureID: UUID
+    var color: SIMD4<Float>
+    var repeats: SIMD2<Float>
+    var offsets: SIMD2<Float>
+    var rotation: Float
+    var bumpAndShininess: UInt8
+    var mediaAndTexgen: UInt8
+    var glow: Float
+    var materialID: UUID?
+
+    var isFullbright: Bool { bumpAndShininess & 0x20 != 0 }
+}
+
+enum TextureEntryDecoder {
+    /// LL texture entries contain a default followed by face-mask exceptions for each field.
+    /// Preserve 64 faces so mesh material indices are not collapsed to one material.
+    static func decode(_ data: [UInt8]) throws -> [FaceAppearance] {
+        guard !data.isEmpty else { return [] }
+        var reader = PacketReader(data)
+        let textures = try readField(&reader, width: 16)
+        let colors = try readField(&reader, width: 4)
+        let repeatS = try readField(&reader, width: 4)
+        let repeatT = try readField(&reader, width: 4)
+        let offsetS = try readField(&reader, width: 2)
+        let offsetT = try readField(&reader, width: 2)
+        let rotation = try readField(&reader, width: 2)
+        let bump = try readField(&reader, width: 1)
+        let media = try readField(&reader, width: 1)
+        let glow = try readField(&reader, width: 1)
+        let materials = reader.offset < data.count ? try readField(&reader, width: 16, allowEnd: true) : nil
+        return try (0..<64).map { face in
+            var texture = PacketReader(textures[face])
+            var s = PacketReader(repeatS[face])
+            var t = PacketReader(repeatT[face])
+            var os = PacketReader(offsetS[face])
+            var ot = PacketReader(offsetT[face])
+            var angle = PacketReader(rotation[face])
+            let color = colors[face].map { Float(255 - $0) / 255 }
+            let material = try materials.map { values -> UUID in
+                var bytes = PacketReader(values[face])
+                return try bytes.uuid()
+            }
+            let result = try FaceAppearance(
+                textureID: texture.uuid(), color: SIMD4(color[0], color[1], color[2], color[3]),
+                repeats: SIMD2(s.float(), t.float()),
+                offsets: SIMD2(Float(Int16(bitPattern: os.u16())) / 32767,
+                               Float(Int16(bitPattern: ot.u16())) / 32767),
+                rotation: Float(Int16(bitPattern: angle.u16())) / 32768 * 2 * .pi,
+                bumpAndShininess: bump[face][0], mediaAndTexgen: media[face][0],
+                glow: Float(glow[face][0]) / 255, materialID: material)
+            guard result.repeats.x.isFinite, result.repeats.y.isFinite else { throw WorldError.malformedPacket }
+            return result
+        }
+    }
+
+    private static func readField(_ reader: inout PacketReader, width: Int,
+                                  allowEnd: Bool = false) throws -> [[UInt8]] {
+        let initial = try reader.take(width)
+        var faces = Array(repeating: initial, count: 64)
+        while reader.offset < reader.bytes.count {
+            var mask: UInt64 = 0
+            var more = true
+            var groups = 0
+            while more {
+                let byte = try reader.u8()
+                guard groups < 10, mask <= UInt64.max >> 7 else { throw WorldError.malformedPacket }
+                mask = mask << 7 | UInt64(byte & 0x7f)
+                more = byte & 0x80 != 0
+                groups += 1
+            }
+            if mask == 0 { return faces }
+            let value = try reader.take(width)
+            for face in 0..<64 where mask & (UInt64(1) << face) != 0 { faces[face] = value }
+        }
+        guard allowEnd else { throw WorldError.malformedPacket }
+        return faces
+    }
+}
+
+extension PacketReader {
+    mutating func uuid() throws -> UUID {
+        let b = try take(16)
+        return UUID(uuid: (b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                           b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]))
+    }
+
+    mutating func terminatedString() throws -> [UInt8] {
+        let start = offset
+        while try u8() != 0 {}
+        return Array(bytes[start..<(offset - 1)])
     }
 }
